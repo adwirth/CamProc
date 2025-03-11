@@ -12,12 +12,19 @@ struct CamProcApp: App {
     }
 }
 
-struct CameraViewControllerRepresentable: UIViewControllerRepresentable {
-    func makeUIViewController(context: Context) -> CameraViewController {
-        CameraViewController()
-    }
+//struct CameraViewControllerRepresentable: UIViewControllerRepresentable {
+//    func makeUIViewController(context: Context) -> CameraViewController {
+//        CameraViewController()
+//    }
+//    func updateUIViewController(_ uiViewController: CameraViewController, context: Context) {}
+//}
+//
 
-    func updateUIViewController(_ uiViewController: CameraViewController, context: Context) {}
+struct CameraViewControllerRepresentable: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> RAWCaptureViewController {
+        RAWCaptureViewController()
+    }
+    func updateUIViewController(_ uiViewController: RAWCaptureViewController, context: Context) {}
 }
 
 class CameraViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -108,5 +115,79 @@ struct CameraView: View {
     var body: some View {
         CameraViewControllerRepresentable()
             .edgesIgnoringSafeArea(.all)
+    }
+}
+
+
+class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate {
+    private let captureSession = AVCaptureSession()
+    private let photoOutput = AVCapturePhotoOutput()
+    private var previewLayer: UIImageView!
+    private let ciContext = CIContext()
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+
+        setupSession()
+        setupPreview()
+        captureSession.startRunning()
+
+        // Start continuous capture
+        captureRAWContinuously()
+    }
+
+    func setupSession() {
+        guard let camera = AVCaptureDevice.default(for: .video),
+              let input = try? AVCaptureDeviceInput(device: camera),
+              captureSession.canAddInput(input),
+              captureSession.canAddOutput(photoOutput) else {
+            print("Unable to configure session.")
+            return
+        }
+
+        captureSession.beginConfiguration()
+        captureSession.sessionPreset = .photo
+        captureSession.addInput(input)
+        captureSession.addOutput(photoOutput)
+        captureSession.commitConfiguration()
+    }
+
+    func setupPreview() {
+        previewLayer = UIImageView(frame: view.bounds)
+        previewLayer.contentMode = .scaleAspectFill
+        view.addSubview(previewLayer)
+    }
+
+    func captureRAWContinuously() {
+        guard let rawFormat = photoOutput.availableRawPhotoPixelFormatTypes.first else {
+            print("RAW capture unsupported.")
+            return
+        }
+
+        Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
+            let photoSettings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
+            self.photoOutput.capturePhoto(with: photoSettings, delegate: self)
+        }
+    }
+
+    // Delegate for RAW capture
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        guard let dngData = photo.fileDataRepresentation(),
+              let ciRawFilter = CIFilter(imageData: dngData, options: [CIRAWFilterOption.allowDraftMode: true]),
+              let outputImage = ciRawFilter.outputImage else {
+            print("Failed RAW processing.")
+            return
+        }
+
+        // Simple debayering preview
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let cgImage = self.ciContext.createCGImage(outputImage, from: outputImage.extent) {
+                let uiImage = UIImage(cgImage: cgImage)
+
+                DispatchQueue.main.async {
+                    self.previewLayer.image = uiImage
+                }
+            }
+        }
     }
 }
