@@ -75,7 +75,7 @@ class CameraViewController: UIViewController, AVCaptureVideoDataOutputSampleBuff
 
         let adjustments: [CIImage?] = [
             ciImage,
-            ciImage.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: 1.0]),
+            ciImage.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: 2.0]),
             ciImage.applyingFilter("CIColorControls", parameters: ["inputContrast": 1.5]),
             applyAutoEnhance(to: ciImage)
         ]
