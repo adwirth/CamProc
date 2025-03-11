@@ -118,7 +118,6 @@ struct CameraView: View {
     }
 }
 
-
 class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate {
     private let captureSession = AVCaptureSession()
     private let photoOutput = AVCapturePhotoOutput()
@@ -164,10 +163,26 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate 
             return
         }
 
-        Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
             let photoSettings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
+            
+            if #available(iOS 16.0, *), let camera = AVCaptureDevice.default(for: .video) {
+                let supportedSizes = camera.activeFormat.supportedMaxPhotoDimensions
+                if let closestSize = supportedSizes.min(by: { abs($0.width - 1920) < abs($1.width - 1920) }) {
+                    photoSettings.maxPhotoDimensions = closestSize
+                }
+            }
+            
+            photoSettings.isAutoVirtualDeviceFusionEnabled = false // Disable extra processing
+            photoSettings.flashMode = .off // Ensure flash is off
+            
             self.photoOutput.capturePhoto(with: photoSettings, delegate: self)
         }
+    }
+
+    // Suppress the camera shutter sound
+    func photoOutput(_ output: AVCapturePhotoOutput, willCapturePhotoFor resolvedSettings: AVCaptureResolvedPhotoSettings) {
+        AudioServicesDisposeSystemSoundID(1108) // Dispose of the system shutter sound
     }
 
     // Delegate for RAW capture
@@ -179,9 +194,12 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate 
             return
         }
 
-        // Simple debayering preview
+        // Downscaling for performance
+        let scaleFactor: CGFloat = 0.1
+        let scaledImage = outputImage.transformed(by: CGAffineTransform(scaleX: scaleFactor, y: scaleFactor))
+        
         DispatchQueue.global(qos: .userInitiated).async {
-            if let cgImage = self.ciContext.createCGImage(outputImage, from: outputImage.extent) {
+            if let cgImage = self.ciContext.createCGImage(scaledImage, from: scaledImage.extent) {
                 let uiImage = UIImage(cgImage: cgImage)
 
                 DispatchQueue.main.async {
