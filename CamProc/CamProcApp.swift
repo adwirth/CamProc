@@ -123,6 +123,7 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate 
     private let photoOutput = AVCapturePhotoOutput()
     private var previewLayer: UIImageView!
     private let ciContext = CIContext()
+    private var captureTimer: Timer?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -133,6 +134,11 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate 
 
         // Start continuous capture
         captureRAWContinuously()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        captureTimer?.invalidate()
     }
 
     func setupSession() {
@@ -163,7 +169,8 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate 
             return
         }
 
-        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
+        captureTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
             let photoSettings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
             
             if #available(iOS 16.0, *), let camera = AVCaptureDevice.default(for: .video) {
@@ -187,6 +194,8 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate 
 
     // Delegate for RAW capture
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        defer { photoOutput.maxPhotoQualityPrioritization = .balanced } // Release resources
+
         guard let dngData = photo.fileDataRepresentation(),
               let ciRawFilter = CIFilter(imageData: dngData, options: [CIRAWFilterOption.allowDraftMode: true]),
               let outputImage = ciRawFilter.outputImage else {
