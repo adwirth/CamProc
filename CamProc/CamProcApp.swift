@@ -1,10 +1,3 @@
-//
-//  CamProcApp.swift
-//  CamProc
-//
-//  Created by rtf59354 on 10/03/2025.
-//
-
 import SwiftUI
 import AVFoundation
 import CoreImage
@@ -30,7 +23,7 @@ struct CameraViewControllerRepresentable: UIViewControllerRepresentable {
 class CameraViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate {
     private let captureSession = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
-    private var previewLayer = CALayer()
+    private var previewLayers: [CALayer] = [CALayer(), CALayer(), CALayer(), CALayer()]
     private let ciContext = CIContext()
 
     override func viewDidLoad() {
@@ -55,14 +48,23 @@ class CameraViewController: UIViewController, AVCaptureVideoDataOutputSampleBuff
 
         captureSession.commitConfiguration()
 
-        previewLayer.contentsGravity = .resizeAspectFill
-        view.layer.addSublayer(previewLayer)
+        previewLayers.forEach { layer in
+            layer.contentsGravity = .resizeAspectFill
+            view.layer.addSublayer(layer)
+        }
+
         captureSession.startRunning()
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        previewLayer.frame = view.bounds
+        let halfWidth = view.bounds.width / 2
+        let halfHeight = view.bounds.height / 2
+
+        previewLayers[0].frame = CGRect(x: 0, y: 0, width: halfWidth, height: halfHeight)
+        previewLayers[1].frame = CGRect(x: halfWidth, y: 0, width: halfWidth, height: halfHeight)
+        previewLayers[2].frame = CGRect(x: 0, y: halfHeight, width: halfWidth, height: halfHeight)
+        previewLayers[3].frame = CGRect(x: halfWidth, y: halfHeight, width: halfWidth, height: halfHeight)
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
@@ -71,33 +73,34 @@ class CameraViewController: UIViewController, AVCaptureVideoDataOutputSampleBuff
 
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
 
-        guard let adjustedImage = autoLevelAdjust(ciImage) else {
-            CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
-            return
-        }
+        let adjustments: [CIImage?] = [
+            ciImage,
+            ciImage.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: 1.0]),
+            ciImage.applyingFilter("CIColorControls", parameters: ["inputContrast": 1.5]),
+            applyAutoEnhance(to: ciImage)
+        ]
 
         DispatchQueue.main.async {
-            self.previewLayer.contents = adjustedImage.cgImage
+            for (layer, image) in zip(self.previewLayers, adjustments) {
+                if let cgImage = self.ciContext.createCGImage(image ?? ciImage, from: ciImage.extent) {
+                    layer.contents = cgImage
+                }
+            }
         }
 
         CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
     }
 
-    private func autoLevelAdjust(_ image: CIImage) -> UIImage? {
+    private func applyAutoEnhance(to image: CIImage) -> CIImage? {
         let filters = image.autoAdjustmentFilters()
-        var adjustedImage = image
-
+        var enhancedImage = image
         for filter in filters {
-            filter.setValue(adjustedImage, forKey: kCIInputImageKey)
+            filter.setValue(enhancedImage, forKey: kCIInputImageKey)
             if let output = filter.outputImage {
-                adjustedImage = output
+                enhancedImage = output
             }
         }
-
-        if let cgImage = ciContext.createCGImage(adjustedImage, from: adjustedImage.extent) {
-            return UIImage(cgImage: cgImage)
-        }
-        return nil
+        return enhancedImage
     }
 }
 
