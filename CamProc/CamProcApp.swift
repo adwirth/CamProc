@@ -1,6 +1,8 @@
 import SwiftUI
 import AVFoundation
 import CoreImage
+import Metal
+import MetalKit
 
 @main
 struct CamProcApp: App {
@@ -26,28 +28,24 @@ struct CameraView: View {
     }
 }
 
-class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate {
+class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate, MTKViewDelegate {
     private let captureSession = AVCaptureSession()
     private let photoOutput = AVCapturePhotoOutput()
-    private var previewLayer: UIImageView!
-    private let ciContext = CIContext()
-    private var captureTimer: Timer?
-    private var cachedCGImage: CGImage?
+    private var metalView: MTKView!
+    private var metalDevice: MTLDevice!
+    private var metalCommandQueue: MTLCommandQueue!
+    private var metalPipeline: MTLComputePipelineState!
+    private var metalTexture: MTLTexture?
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
         setupSession()
-        setupPreview()
+        setupMetal()
         captureSession.startRunning()
 
-        // Start continuous capture
+        // Start continuous RAW capture
         captureRAWContinuously()
-    }
-
-    override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
-        captureTimer?.invalidate()
     }
 
     func setupSession() {
@@ -58,6 +56,7 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate 
             print("Unable to configure session.")
             return
         }
+
         try? camera.lockForConfiguration()
         camera.exposureMode = .custom
         camera.whiteBalanceMode = .locked
@@ -74,40 +73,53 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate 
         captureSession.commitConfiguration()
     }
 
-    func setupPreview() {
-        previewLayer = UIImageView(frame: view.bounds)
-        previewLayer.contentMode = .scaleAspectFill
-        view.addSubview(previewLayer)
+    func setupMetal() {
+        guard let metalDevice = MTLCreateSystemDefaultDevice() else {
+            print("Failed to create Metal device.")
+            return
+        }
+        self.metalDevice = metalDevice
+        self.metalCommandQueue = metalDevice.makeCommandQueue()
+        
+        // Set up Metal view
+        metalView = MTKView(frame: view.bounds, device: metalDevice)
+        metalView.contentMode = .scaleAspectFill
+        metalView.enableSetNeedsDisplay = false
+        metalView.framebufferOnly = false
+        metalView.delegate = self  // Set the MTKView delegate
+        view.addSubview(metalView)
+
+        // Load Metal shader
+        do {
+            let metalLibrary = metalDevice.makeDefaultLibrary()
+            let kernelFunction = metalLibrary?.makeFunction(name: "debayerRChannel")
+            self.metalPipeline = try metalDevice.makeComputePipelineState(function: kernelFunction!)
+        } catch {
+            print("Failed to create Metal pipeline: \(error.localizedDescription)")
+        }
     }
-    
+
     func captureRAWContinuously() {
         guard let rawFormat = photoOutput.availableRawPhotoPixelFormatTypes.first else {
             print("RAW capture unsupported.")
             return
         }
 
-        captureTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
+        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             let photoSettings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
-            
-            photoSettings.isAutoVirtualDeviceFusionEnabled = false // Disable extra processing
-            photoSettings.flashMode = .off // Ensure flash is off
-            
             self.photoOutput.capturePhoto(with: photoSettings, delegate: self)
         }
     }
 
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        AudioServicesDisposeSystemSoundID(1108) // Dispose of the system shutter sound
-
-        guard let dngData = photo.fileDataRepresentation() else {
-            print("Failed to get DNG data.")
+        guard let dngData = photo.fileDataRepresentation(),
+              let (rawBayerData, width, height) = extractBayerFromDNG(dngData) else {
+            print("Failed to extract Bayer data.")
             return
         }
 
-        if let (rawBayerData, width, height) = extractBayerFromDNG(dngData) {
-            updateBayerImage(rawBayerData, width: width, height: height)
-        }
+        processWithMetal(rawBayerData, width: width, height: height)
     }
     
     func extractBayerFromDNG(_ dngData: Data) -> ([UInt16], Int, Int)? {
@@ -135,20 +147,60 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate 
         return (pixelArray, width, height)
     }
     
-    func updateBayerImage(_ bayerData: [UInt16], width: Int, height: Int) {
-        let bitsPerComponent = 16
-        let bytesPerPixel = 2
-        let bytesPerRow = width * bytesPerPixel
-        let colorSpace = CGColorSpaceCreateDeviceGray()
-        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue)
-
-        if let providerRef = CGDataProvider(data: NSData(bytes: bayerData, length: bayerData.count * MemoryLayout<UInt16>.size)),
-           let newCGImage = CGImage(width: width, height: height, bitsPerComponent: bitsPerComponent, bitsPerPixel: bytesPerPixel * 8, bytesPerRow: bytesPerRow, space: colorSpace, bitmapInfo: bitmapInfo, provider: providerRef, decode: nil, shouldInterpolate: false, intent: .defaultIntent) {
-            
-            cachedCGImage = newCGImage
-            DispatchQueue.main.async {
-                self.previewLayer.image = UIImage(cgImage: newCGImage)
-            }
+    func processWithMetal(_ bayerData: [UInt16], width: Int, height: Int) {
+        guard let texture = createTexture(from: bayerData, width: width, height: height) else {
+            print("Failed to create Metal texture.")
+            return
         }
+        metalTexture = texture
+        metalView.setNeedsDisplay()
+    }
+
+    func createTexture(from data: [UInt16], width: Int, height: Int) -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor()
+        descriptor.pixelFormat = .r16Uint  // Changed from .r16Unorm to .r16Uint
+        descriptor.width = width
+        descriptor.height = height
+        descriptor.usage = [.shaderRead, .shaderWrite]
+
+        guard let texture = metalDevice.makeTexture(descriptor: descriptor) else {
+            print("Failed to create Metal texture")
+            return nil
+        }
+
+        texture.replace(region: MTLRegionMake2D(0, 0, width, height),
+                        mipmapLevel: 0,
+                        withBytes: data,
+                        bytesPerRow: width * MemoryLayout<UInt16>.size)
+
+        return texture
+    }
+
+
+    func draw(in view: MTKView) {
+        guard let currentDrawable = metalView.currentDrawable,
+              let texture = metalTexture,
+              let commandBuffer = metalCommandQueue.makeCommandBuffer(),
+              let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            return
+        }
+
+        computeEncoder.setComputePipelineState(metalPipeline)
+        computeEncoder.setTexture(texture, index: 0)
+        computeEncoder.setTexture(currentDrawable.texture, index: 1)
+
+        let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
+        let threadGroups = MTLSize(width: (texture.width + 15) / 16,
+                                   height: (texture.height + 15) / 16,
+                                   depth: 1)
+        computeEncoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
+
+        computeEncoder.endEncoding()
+        commandBuffer.present(currentDrawable)
+        commandBuffer.commit()
+    }
+
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        // Handle resizing if needed
     }
 }
