@@ -149,6 +149,17 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate 
             print("Unable to configure session.")
             return
         }
+//        guard let camera = AVCaptureDevice.default(for: .video) else { return }
+        try? camera.lockForConfiguration()
+        camera.exposureMode = .custom
+        camera.whiteBalanceMode = .locked
+        camera.focusMode = .locked
+        camera.setExposureModeCustom(duration: CMTime(value: 1, timescale: 100), iso: 1000, completionHandler: nil)
+        camera.setWhiteBalanceModeLocked(with: AVCaptureDevice.WhiteBalanceGains(redGain: 2.0, greenGain: 1.0, blueGain: 1.5), completionHandler: nil)
+        camera.setFocusModeLocked(lensPosition: 0.5, completionHandler: nil) // 0.0 = close, 1.0 = infinity
+        camera.unlockForConfiguration()
+
+
 
         captureSession.beginConfiguration()
         captureSession.sessionPreset = .photo
@@ -199,13 +210,13 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate 
         guard let dngData = photo.fileDataRepresentation(),
               let ciRawFilter = CIFilter(imageData: dngData, options: [CIRAWFilterOption.allowDraftMode: true]),
               let outputImage = ciRawFilter.outputImage else {
-            print("Failed RAW processing.")
+            // print("Failed RAW processing.")
             return
         }
 
         // Downscaling for performance
-        let scaleFactor: CGFloat = 0.1
-        let scaledImage = outputImage.transformed(by: CGAffineTransform(scaleX: scaleFactor, y: scaleFactor))
+        // let scaleFactor: CGFloat = 0.1
+        let scaledImage = outputImage //.transformed(by: CGAffineTransform(scaleX: scaleFactor, y: scaleFactor))
         
         DispatchQueue.global(qos: .userInitiated).async {
             if let cgImage = self.ciContext.createCGImage(scaledImage, from: scaledImage.extent) {
