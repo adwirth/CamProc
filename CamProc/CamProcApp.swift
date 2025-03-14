@@ -81,31 +81,37 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate,
         self.metalDevice = metalDevice
         self.metalCommandQueue = metalDevice.makeCommandQueue()
         
-        // Set up Metal view
+        // Set up Metal view with full drawable size
         metalView = MTKView(frame: view.bounds, device: metalDevice)
         metalView.contentMode = .scaleAspectFill
-        metalView.enableSetNeedsDisplay = false
         metalView.framebufferOnly = false
-        metalView.delegate = self  // Set the MTKView delegate
+        // Ensure drawable size matches screen dimensions
+        let screenSize = UIScreen.main.bounds.size
+        metalView.drawableSize = CGSize(width: screenSize.width, height: screenSize.height)
+
+        metalView.delegate = self
         view.addSubview(metalView)
 
+      
         // Load Metal shader
         do {
             let metalLibrary = metalDevice.makeDefaultLibrary()
-            let kernelFunction = metalLibrary?.makeFunction(name: "debayerRChannel")
+            let kernelFunction = metalLibrary?.makeFunction(name: "debayerBilinear")
             self.metalPipeline = try metalDevice.makeComputePipelineState(function: kernelFunction!)
         } catch {
             print("Failed to create Metal pipeline: \(error.localizedDescription)")
         }
     }
 
+    
+    
     func captureRAWContinuously() {
         guard let rawFormat = photoOutput.availableRawPhotoPixelFormatTypes.first else {
             print("RAW capture unsupported.")
             return
         }
 
-        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+        Timer.scheduledTimer(withTimeInterval: 1.3, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             let photoSettings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
             self.photoOutput.capturePhoto(with: photoSettings, delegate: self)
@@ -127,26 +133,43 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate,
             print("Failed to create image source.")
             return nil
         }
+
+        // Extract metadata to get full sensor resolution
+        guard let imageProperties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any] else {
+            print("Failed to read DNG metadata.")
+            return nil
+        }
+
+        guard let width = imageProperties[kCGImagePropertyPixelWidth] as? Int,
+              let height = imageProperties[kCGImagePropertyPixelHeight] as? Int else {
+            print("Failed to extract width and height from DNG metadata.")
+            return nil
+        }
+
+        print("DNG Image Dimensions: \(width) x \(height)")
+
         guard let image = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
             print("Failed to create CGImage from RAW.")
             return nil
         }
-        let width = image.width
-        let height = image.height
+
         guard let dataProvider = image.dataProvider else {
             print("Failed to get data provider.")
             return nil
         }
+
         guard let rawPixelData = dataProvider.data else {
             print("Failed to extract raw pixel data.")
             return nil
         }
+
         let pixelArray = CFDataGetBytePtr(rawPixelData)!.withMemoryRebound(to: UInt16.self, capacity: width * height) {
             Array(UnsafeBufferPointer(start: $0, count: width * height))
         }
+
         return (pixelArray, width, height)
     }
-    
+
     func processWithMetal(_ bayerData: [UInt16], width: Int, height: Int) {
         guard let texture = createTexture(from: bayerData, width: width, height: height) else {
             print("Failed to create Metal texture.")
@@ -158,24 +181,26 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate,
 
     func createTexture(from data: [UInt16], width: Int, height: Int) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor()
-        descriptor.pixelFormat = .r16Uint  // Changed from .r16Unorm to .r16Uint
+        descriptor.pixelFormat = .r16Uint  // Ensure correct format
         descriptor.width = width
         descriptor.height = height
         descriptor.usage = [.shaderRead, .shaderWrite]
+        descriptor.storageMode = .shared
 
         guard let texture = metalDevice.makeTexture(descriptor: descriptor) else {
             print("Failed to create Metal texture")
             return nil
         }
 
+        let bytesPerRow = width * MemoryLayout<UInt16>.size
+
         texture.replace(region: MTLRegionMake2D(0, 0, width, height),
                         mipmapLevel: 0,
                         withBytes: data,
-                        bytesPerRow: width * MemoryLayout<UInt16>.size)
+                        bytesPerRow: bytesPerRow)
 
         return texture
     }
-
 
     func draw(in view: MTKView) {
         guard let currentDrawable = metalView.currentDrawable,
