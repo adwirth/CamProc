@@ -58,12 +58,12 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate,
         }
 
         try? camera.lockForConfiguration()
-        camera.exposureMode = .custom
-        camera.whiteBalanceMode = .locked
-        camera.focusMode = .locked
-        camera.setExposureModeCustom(duration: CMTime(value: 1, timescale: 100), iso: 1000, completionHandler: nil)
-        camera.setWhiteBalanceModeLocked(with: AVCaptureDevice.WhiteBalanceGains(redGain: 2.0, greenGain: 1.0, blueGain: 1.5), completionHandler: nil)
-        camera.setFocusModeLocked(lensPosition: 0.5, completionHandler: nil)
+        camera.exposureMode = .autoExpose //.custom
+//        camera.whiteBalanceMode = .autoWhiteBalance//.locked
+        camera.focusMode = .autoFocus//.locked
+//        camera.setExposureModeCustom(duration: CMTime(value: 1, timescale: 100), iso: 1000, completionHandler: nil)
+//        camera.setWhiteBalanceModeLocked(with: AVCaptureDevice.WhiteBalanceGains(redGain: 2.0, greenGain: 1.0, blueGain: 1.5), completionHandler: nil)
+//        camera.setFocusModeLocked(lensPosition: 0.5, completionHandler: nil)
         camera.unlockForConfiguration()
 
         captureSession.beginConfiguration()
@@ -86,8 +86,8 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate,
         metalView.contentMode = .scaleAspectFill
         metalView.framebufferOnly = false
         // Ensure drawable size matches screen dimensions
-        let screenSize = UIScreen.main.bounds.size
-        metalView.drawableSize = CGSize(width: screenSize.width, height: screenSize.height)
+        //let screenSize = CGSize(width: 10, height: 10) //UIScreen.main.bounds.size
+        //metalView.drawableSize = CGSize(width: screenSize.width, height: screenSize.height)
 
         metalView.delegate = self
         view.addSubview(metalView)
@@ -97,13 +97,13 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate,
         do {
             let metalLibrary = metalDevice.makeDefaultLibrary()
             let kernelFunction = metalLibrary?.makeFunction(name: "debayerBilinear")
+//            let kernelFunction = metalLibrary?.makeFunction(name: "metalTextureGenerator")
+
             self.metalPipeline = try metalDevice.makeComputePipelineState(function: kernelFunction!)
         } catch {
             print("Failed to create Metal pipeline: \(error.localizedDescription)")
         }
     }
-
-    
     
     func captureRAWContinuously() {
         guard let rawFormat = photoOutput.availableRawPhotoPixelFormatTypes.first else {
@@ -113,20 +113,63 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate,
 
         Timer.scheduledTimer(withTimeInterval: 1.3, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            let photoSettings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
-            self.photoOutput.capturePhoto(with: photoSettings, delegate: self)
+//            let photoSettings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
+//            self.photoOutput.capturePhoto(with: photoSettings, delegate: self)
+//            
+            let rawFormat = kCVPixelFormatType_14Bayer_RGGB
+            let rawSettings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
+            self.photoOutput.capturePhoto(with: rawSettings, delegate: self)
+
+
+            
         }
     }
 
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        guard let dngData = photo.fileDataRepresentation(),
-              let (rawBayerData, width, height) = extractBayerFromDNG(dngData) else {
-            print("Failed to extract Bayer data.")
+        guard let pixelBuffer = photo.pixelBuffer else {
+            print("Failed to get pixel buffer")
+            return
+        }
+
+        guard let (rawBayerData, width, height) = extractBayerFromPixelBuffer(pixelBuffer) else {
+            print("Failed to extract Bayer data from PixelBuffer")
             return
         }
 
         processWithMetal(rawBayerData, width: width, height: height)
     }
+    
+    func extractBayerFromPixelBuffer(_ pixelBuffer: CVPixelBuffer) -> ([UInt16], Int, Int)? {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+            print("Failed to get base address of pixel buffer")
+            return nil
+        }
+
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+
+        print("x: \(width), y: \(height), bytesPerRow: \(bytesPerRow)", width, height, bytesPerRow)
+        // Ensure the format is compatible (14-bit or 16-bit RAW)
+        let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        guard pixelFormat == kCVPixelFormatType_14Bayer_RGGB ||
+              pixelFormat == kCVPixelFormatType_16Gray else {
+            print("Unsupported pixel format: \(pixelFormat)")
+            return nil
+        }
+
+        // Convert raw Bayer pixels to UInt16 array
+        let pixelData = baseAddress.assumingMemoryBound(to: UInt16.self)
+        let count = bytesPerRow / MemoryLayout<UInt16>.size * height
+        let rawBayerArray = Array(UnsafeBufferPointer(start: pixelData, count: count))
+
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
+        
+        return (rawBayerArray, width, height)
+    }
+
     
     func extractBayerFromDNG(_ dngData: Data) -> ([UInt16], Int, Int)? {
         guard let imageSource = CGImageSourceCreateWithData(dngData as CFData, nil) else {
@@ -213,6 +256,9 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate,
         computeEncoder.setComputePipelineState(metalPipeline)
         computeEncoder.setTexture(texture, index: 0)
         computeEncoder.setTexture(currentDrawable.texture, index: 1)
+        print(texture.width, texture.height)
+        print(currentDrawable.texture.width, currentDrawable.texture.height)
+        
 
         let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
         let threadGroups = MTLSize(width: (texture.width + 15) / 16,
