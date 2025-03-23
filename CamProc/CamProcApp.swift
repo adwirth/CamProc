@@ -58,9 +58,9 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate,
         }
 
         try? camera.lockForConfiguration()
-        camera.exposureMode = .autoExpose //.custom
-//        camera.whiteBalanceMode = .autoWhiteBalance//.locked
-        camera.focusMode = .autoFocus//.locked
+        camera.exposureMode = .continuousAutoExposure //.custom
+        camera.whiteBalanceMode = .continuousAutoWhiteBalance //.locked
+        camera.focusMode = .continuousAutoFocus//.locked
 //        camera.setExposureModeCustom(duration: CMTime(value: 1, timescale: 100), iso: 1000, completionHandler: nil)
 //        camera.setWhiteBalanceModeLocked(with: AVCaptureDevice.WhiteBalanceGains(redGain: 2.0, greenGain: 1.0, blueGain: 1.5), completionHandler: nil)
 //        camera.setFocusModeLocked(lensPosition: 0.5, completionHandler: nil)
@@ -119,9 +119,6 @@ class RAWCaptureViewController: UIViewController, AVCapturePhotoCaptureDelegate,
             let rawFormat = kCVPixelFormatType_14Bayer_RGGB
             let rawSettings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
             self.photoOutput.capturePhoto(with: rawSettings, delegate: self)
-
-
-            
         }
     }
 
