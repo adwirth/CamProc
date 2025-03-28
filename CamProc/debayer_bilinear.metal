@@ -24,7 +24,6 @@ kernel void debayerBilinear(texture2d<uint, access::read> inputTexture [[texture
         for (int x = 0; x < 4; ++x) {
             uint2 pixelIndex = uint2(base.x + x - 1, base.y + y - 1);
             pval[x][y] = inputTexture.read(pixelIndex).r;
-            // tex2D<uint8_t>(source_tex, x + base.x - 1, y + base.y - 1);
         }
     }
     int2 shifts[4] = { {0, 0}, {0, 1}, {1, 0}, {1, 1} };
@@ -77,5 +76,6 @@ kernel void debayerBilinear(texture2d<uint, access::read> inputTexture [[texture
         rgb = float3(1.f, 0.f, 0.f);
     if ((gid.y+border) % oheight < border * 2)
         rgb = float3(1.f, 0.f, 0.f);
+    rgb = float3(1.f, 1.f, 1.f);
     outputTexture.write(float4(rgb, 1.0), gid);
 }
