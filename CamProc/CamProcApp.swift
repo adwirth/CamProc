@@ -18,6 +18,7 @@ class TextureStore: ObservableObject {
 
     @Published var latestTexture: MTLTexture?
     private var device: MTLDevice!
+    private var isFirstFrame = true
 
     init() {
         device = MTLCreateSystemDefaultDevice()
@@ -38,9 +39,18 @@ class TextureStore: ObservableObject {
                         withBytes: rawBayerArray,
                         bytesPerRow: bytesPerRow)
 
-        latestTexture = texture
+        if isFirstFrame {
+            isFirstFrame = false
+            print("[DEBUG] Delaying first texture assignment")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                self.latestTexture = texture
+            }
+        } else {
+            latestTexture = texture
+        }
     }
 }
+
 
 
 // MARK: - ViewModel
@@ -127,71 +137,12 @@ class CameraManager: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
             print("RAW format not available")
             return
         }
-        let rawFormat = kCVPixelFormatType_14Bayer_RGGB
-        let settings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
+        let settings = AVCapturePhotoSettings(rawPixelFormatType: formatType)
         settings.flashMode = .off
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
 
-     func extractBayerFromPixelBuffer(_ pixelBuffer: CVPixelBuffer) -> ([UInt16], Int, Int)? {
-         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-         
-         guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
-             print("Failed to get base address of pixel buffer")
-             return nil
-         }
-
-         let width = CVPixelBufferGetWidth(pixelBuffer)
-         let height = CVPixelBufferGetHeight(pixelBuffer)
-         let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-
-         print("x: \(width), y: \(height), bytesPerRow: \(bytesPerRow)", width, height, bytesPerRow)
-         // Ensure the format is compatible (14-bit or 16-bit RAW)
-         let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
-         guard pixelFormat == kCVPixelFormatType_14Bayer_RGGB ||
-               pixelFormat == kCVPixelFormatType_16Gray else {
-             print("Unsupported pixel format: \(pixelFormat)")
-             return nil
-         }
-
-         // Convert raw Bayer pixels to UInt16 array
-         let pixelData = baseAddress.assumingMemoryBound(to: UInt16.self)
-         let count = bytesPerRow / MemoryLayout<UInt16>.size * height
-         let rawBayerArray = Array(UnsafeBufferPointer(start: pixelData, count: count))
-
-         CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
-         
-         return (rawBayerArray, width, height)
-     }
-
-    func processWithMetal(_ bayerData: [UInt16], width: Int, height: Int) {
-//        guard let texture = createTexture(from: bayerData, width: width, height: height) else {
-//            print("Failed to create Metal texture.")
-//            return
-//        }
-        print("Updating texture")
-        DispatchQueue.main.async {
-            TextureStore.shared.updateTexture(rawBayerArray: bayerData, width: width, height: height)
-        }
-//        metalTexture = texture
-//        metalView.setNeedsDisplay()
-    }
-    
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        guard let pixelBuffer = photo.pixelBuffer else {
-            print("Failed to get pixel buffer")
-            return
-        }
-
-        guard let (rawBayerData, width, height) = extractBayerFromPixelBuffer(pixelBuffer) else {
-            print("Failed to extract Bayer data from PixelBuffer")
-            return
-        }
-        print("Start process with Metal")
-        processWithMetal(rawBayerData, width: width, height: height)
-    }
-    
-    func photoOutputX(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         print("Captured RAW photo")
         guard let pixelBuffer = photo.pixelBuffer else {
             print("Failed to get pixel buffer")
@@ -215,9 +166,10 @@ class CameraManager: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
 
         print("Captured RAW: \(width)x\(height), pixels: \(rawBayerArray.prefix(10))")
         // Create a Metal texture from the raw data and update view model
-        DispatchQueue.main.async {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
             TextureStore.shared.updateTexture(rawBayerArray: rawBayerArray, width: width, height: height)
         }
+
     }
 }
 
@@ -266,10 +218,11 @@ struct ViewportGrid: View {
 // MARK: - Metal Viewport with Texture
 struct MetalViewport: View {
     let pipeline: PipelineDefinition
+    @ObservedObject var textureStore = TextureStore.shared
     var body: some View {
         ZStack {
-    if let texture = TextureStore.shared.latestTexture {
-        MetalTextureView(texture: texture)
+            if let texture = textureStore.latestTexture {
+                MetalTextureView(texture: texture)
     } else {
         Color.black
     }
@@ -283,7 +236,6 @@ struct MetalViewport: View {
         }
     }
 
-
 // MARK: - Metal Texture View
 struct MetalTextureView: UIViewRepresentable {
     var texture: MTLTexture
@@ -292,44 +244,77 @@ struct MetalTextureView: UIViewRepresentable {
         let mtkView = MTKView()
         mtkView.device = MTLCreateSystemDefaultDevice()
         mtkView.framebufferOnly = false
-        mtkView.enableSetNeedsDisplay = true
-        mtkView.isPaused = true
+        mtkView.enableSetNeedsDisplay = false
+        mtkView.isPaused = false
+
+        // Ensure view has size
+        mtkView.frame = CGRect(x: 0, y: 0, width: texture.width, height: texture.height)
+        mtkView.drawableSize = CGSize(width: texture.width, height: texture.height)
+
         return mtkView
     }
 
     func updateUIView(_ uiView: MTKView, context: Context) {
-        guard let drawable = uiView.currentDrawable,
-              let commandQueue = uiView.device?.makeCommandQueue(),
-              let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+        print("[DEBUG] updateUIView called")
 
-        guard let computePipeline = try? uiView.device?.makeDefaultLibrary()?.makeFunction(name: "debayerBilinear").flatMap({ try uiView.device?.makeComputePipelineState(function: $0) }) else {
-            print("Failed to create compute pipeline")
-            return
+        uiView.drawableSize = CGSize(width: texture.width, height: texture.height)
+
+        DispatchQueue.main.async {
+            guard let drawable = uiView.currentDrawable else {
+                print("[DEBUG] No currentDrawable")
+                return
+            }
+
+            guard
+                let commandQueue = uiView.device?.makeCommandQueue(),
+                let commandBuffer = commandQueue.makeCommandBuffer() else {
+                print("[DEBUG] Failed to create command queue/buffer")
+                return
+            }
+
+            guard let computeFunction = try? uiView.device?.makeDefaultLibrary()?.makeFunction(name: "debayerBilinear"),
+                  let computePipeline = try? uiView.device?.makeComputePipelineState(function: computeFunction) else {
+                print("[DEBUG] Failed to create compute pipeline")
+                return
+            }
+
+            let outputTexture = drawable.texture
+            print("[DEBUG] Drawable texture size: \(outputTexture.width)x\(outputTexture.height)")
+            print("[DEBUG] Input texture size: \(texture.width)x\(texture.height)")
+
+            guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                print("[DEBUG] Failed to create compute encoder")
+                return
+            }
+
+            computeEncoder.setComputePipelineState(computePipeline)
+            computeEncoder.setTexture(texture, index: 0)
+            computeEncoder.setTexture(outputTexture, index: 1)
+
+            let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
+            let threadGroups = MTLSize(width: (texture.width + 15) / 16,
+                                       height: (texture.height + 15) / 16,
+                                       depth: 1)
+
+            print("[DEBUG] Dispatched threadgroups: \(threadGroups)")
+            
+            if uiView.drawableSize != CGSize(width: texture.width, height: texture.height) {
+                print("[DEBUG] Adjusting drawableSize to match input texture")
+                uiView.drawableSize = CGSize(width: texture.width, height: texture.height)
+            }
+
+
+            computeEncoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
+            computeEncoder.endEncoding()
+
+            commandBuffer.present(drawable)
+            commandBuffer.commit()
+
+            print("[DEBUG] Frame rendered")
         }
-
-        let outputTexture = drawable.texture
-
-        let computeEncoder = commandBuffer.makeComputeCommandEncoder()
-        computeEncoder?.setComputePipelineState(computePipeline)
-        computeEncoder?.setTexture(texture, index: 0)
-        computeEncoder?.setTexture(outputTexture, index: 1)
-
-        let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
-        let threadGroups = MTLSize(width: (texture.width + 15) / 16,
-                                   height: (texture.height + 15) / 16,
-                                   depth: 1)
-
-        computeEncoder?.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
-        computeEncoder?.endEncoding()
-
-        commandBuffer.present(drawable)
-        commandBuffer.commit()
-
-        // 👇 Add this line:
-        uiView.draw()
     }
-
 }
+
 
 
 // MARK: - Exposure Control + Configuration Panel
@@ -392,4 +377,3 @@ struct ConfigPanel: View {
         }.padding()
     }
 }
-

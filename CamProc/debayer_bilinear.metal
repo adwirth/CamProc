@@ -76,6 +76,5 @@ kernel void debayerBilinear(texture2d<uint, access::read> inputTexture [[texture
         rgb = float3(1.f, 0.f, 0.f);
     if ((gid.y+border) % oheight < border * 2)
         rgb = float3(1.f, 0.f, 0.f);
-    rgb = float3(1.f, 1.f, 1.f);
     outputTexture.write(float4(rgb, 1.0), gid);
 }
